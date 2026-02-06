@@ -1,0 +1,32 @@
+# 依赖包（占用空间最大的元凶）
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# 构建产物
+dist/
+build/
+.next/
+out/
+
+# 日志与缓存
+*.log
+.cache/
+.eslintcache
+npm-debug.log*
+
+# 多媒体与大文件
+*.mp4
+*.zip
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# 版本控制与系统文件
+.git/
+.svn/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,21 @@
+# Node dependencies
+node_modules/
+package-lock.json
+npm-debug.log
+yarn-error.log
+
+# Build output
+dist/
+dist_electron/
+out/ # electron-builder 可能还会生成 out 目录
+
+# IDE and OS files
+.DS_Store
+*.log
+# 如果你使用VS Code，可以忽略这个文件夹
+.vscode/
+
+# Environment files
+.env
+.env.development
+.env.production
