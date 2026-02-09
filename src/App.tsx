@@ -56,7 +56,7 @@ interface Conversation {
 const AI_INPUT_CONFIG: Record<string, { 
   inputSelector: string; 
   sendSelector: string; 
-  inputMethod: 'value' | 'innerText' | 'clipboard'; 
+  inputMethod: 'value' | 'innerText' | 'clipboard' | 'google'; 
   useEnterToSend?: boolean;
   newChatSelector?: string;  // 新建对话按钮选择器
   newChatShortcut?: { key: string; ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean };  // 新建对话快捷键
@@ -101,19 +101,19 @@ const AI_INPUT_CONFIG: Record<string, {
     // Google AI 使用特殊的输入框选择器和增强的输入处理
     inputSelector: 'div[role="textbox"], div[contenteditable="true"], textarea, input[type="text"]',
     sendSelector: 'button[aria-label*="发送"], button[aria-label*="Send"], button[jsaction*="send"], button[aria-label*="提交"], button[data-tooltip*="发送"], button[type="submit"]',
-    inputMethod: 'innerText',
+    inputMethod: 'google',
     useEnterToSend: true,
-    // Google 新建对话快捷键 Ctrl+K
-    newChatShortcut: { key: 'k', ctrlKey: true }
+    // Google AI 通过跳转URL新建对话
+    newChatUrl: 'https://www.google.com/search?udm=50'
   },
   'Google AI': {
     // Google AI 使用特殊的输入框选择器和增强的输入处理
     inputSelector: 'div[role="textbox"], div[contenteditable="true"], textarea, input[type="text"]',
     sendSelector: 'button[aria-label*="发送"], button[aria-label*="Send"], button[jsaction*="send"], button[aria-label*="提交"], button[data-tooltip*="发送"], button[type="submit"]',
-    inputMethod: 'innerText',
+    inputMethod: 'google',
     useEnterToSend: true,
-    // Google AI 新建对话快捷键 Ctrl+K
-    newChatShortcut: { key: 'k', ctrlKey: true }
+    // Google AI 通过跳转URL新建对话
+    newChatUrl: 'https://www.google.com/search?udm=50'
   }
 };
 
@@ -141,6 +141,9 @@ function generateNewChatScript(config: {
     return `
       (function() {
         console.log('通过URL跳转新建对话');
+        // 禁用自动滚动（如果之前有对话触发的滚动）
+        window.__googleAIScrollActive = false;
+        window.__googleAIScrollSession = 0;
         window.location.href = '${config.newChatUrl}';
         return true;
       })();
@@ -252,8 +255,298 @@ function generateNewChatScript(config: {
   `;
 }
 
+// 生成 Google AI 专用的发送消息脚本
+// Google AI 在发送第一条消息后页面会转换为对话模式，DOM 结构完全重建
+// 需要特殊处理：重新查找输入框、使用 execCommand 插入文本、等待 DOM 稳定后再发送
+function generateGoogleSendScript(text: string, config: { inputSelector: string; sendSelector: string; inputMethod: string; useEnterToSend?: boolean }) {
+  return `
+    (function() {
+      try {
+        const text = ${JSON.stringify(text)};
+        console.log('[Google AI] 开始发送消息...');
+        
+        // 查找输入框的函数 - 每次都重新查找，避免使用过期的 DOM 引用
+        function findInput() {
+          // Google AI 的输入框选择器，按优先级排列
+          const selectors = [
+            'div[role="textbox"][contenteditable="true"]',
+            'div[contenteditable="true"][aria-label]',
+            'div[contenteditable="true"]',
+            'textarea',
+            'input[type="text"]'
+          ];
+          for (const selector of selectors) {
+            try {
+              // 使用 querySelectorAll 找到所有匹配的，选择可见的
+              const elements = document.querySelectorAll(selector);
+              for (const el of elements) {
+                if (el && el.offsetParent !== null && !el.closest('[aria-hidden="true"]')) {
+                  console.log('[Google AI] ✓ 找到输入框:', selector, 'tagName:', el.tagName);
+                  return el;
+                }
+              }
+            } catch(e) {}
+          }
+          return null;
+        }
+        
+        // 步骤1: 找到输入框并聚焦
+        let input = findInput();
+        if (!input) {
+          console.error('[Google AI] ✗ 未找到输入框，等待 500ms 后重试...');
+          // Google AI 页面可能还在加载/转换中，等待后重试
+          setTimeout(() => {
+            input = findInput();
+            if (!input) {
+              console.error('[Google AI] ✗ 重试后仍未找到输入框');
+              return false;
+            }
+            doInput(input);
+          }, 500);
+          return true;  // 返回 true 表示正在异步处理
+        }
+        
+        doInput(input);
+        
+        function doInput(inputEl) {
+          // 步骤2: 聚焦并点击输入框，确保它处于编辑状态
+          inputEl.focus();
+          inputEl.click();
+          
+          // 步骤3: 等待一小段时间让焦点生效，然后输入文本
+          setTimeout(() => {
+            // 重新获取输入框（焦点操作可能导致 DOM 变化）
+            let currentInput = findInput();
+            if (!currentInput) {
+              currentInput = inputEl;
+            }
+            
+            currentInput.focus();
+            
+            const isContentEditable = currentInput.contentEditable === 'true' || currentInput.isContentEditable;
+            
+            if (isContentEditable) {
+              console.log('[Google AI] 使用 contenteditable 方式输入');
+              
+              // 先选中所有内容（如果有的话），然后删除
+              const selection = window.getSelection();
+              const range = document.createRange();
+              range.selectNodeContents(currentInput);
+              selection.removeAllRanges();
+              selection.addRange(range);
+              
+              // 使用 execCommand 删除选中内容
+              document.execCommand('delete', false);
+              
+              // 使用 execCommand insertText - 这是最兼容现代框架的方式
+              // 它会触发框架的事件监听器（如 Angular、React 等）
+              const inserted = document.execCommand('insertText', false, text);
+              
+              if (!inserted) {
+                console.log('[Google AI] execCommand 失败，使用备选方案');
+                // 备选方案：手动设置内容
+                currentInput.innerHTML = '';
+                const textNode = document.createTextNode(text);
+                currentInput.appendChild(textNode);
+                
+                // 设置光标到末尾
+                const newRange = document.createRange();
+                newRange.selectNodeContents(currentInput);
+                newRange.collapse(false);
+                selection.removeAllRanges();
+                selection.addRange(newRange);
+                
+                // 触发事件
+                currentInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                currentInput.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: text, inputType: 'insertText' }));
+              }
+              
+              console.log('[Google AI] 输入完成, 内容:', currentInput.innerText?.substring(0, 50));
+            } else if (currentInput.tagName === 'TEXTAREA' || currentInput.tagName === 'INPUT') {
+              console.log('[Google AI] 使用 textarea/input 方式输入');
+              const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set 
+                || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+              if (nativeSetter) {
+                nativeSetter.call(currentInput, text);
+              } else {
+                currentInput.value = text;
+              }
+              currentInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              currentInput.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            }
+            
+            // 步骤4: 等待框架处理输入，然后发送
+            setTimeout(() => {
+              // 重新查找输入框（确保引用最新）
+              let sendInput = findInput();
+              if (!sendInput) sendInput = currentInput;
+              
+              sendInput.focus();
+              
+              console.log('[Google AI] 发送 Enter 键...');
+              
+              // 模拟 Enter 键发送
+              const enterEvent = new KeyboardEvent('keydown', { 
+                key: 'Enter', 
+                code: 'Enter',
+                keyCode: 13, 
+                which: 13,
+                bubbles: true,
+                cancelable: true,
+                composed: true
+              });
+              sendInput.dispatchEvent(enterEvent);
+              
+              // 同时在 document 上触发
+              document.dispatchEvent(new KeyboardEvent('keydown', { 
+                key: 'Enter', 
+                code: 'Enter',
+                keyCode: 13, 
+                which: 13,
+                bubbles: true,
+                cancelable: true,
+                composed: true
+              }));
+              
+              // keypress 事件（某些框架需要）
+              sendInput.dispatchEvent(new KeyboardEvent('keypress', { 
+                key: 'Enter', 
+                code: 'Enter',
+                keyCode: 13, 
+                which: 13,
+                bubbles: true,
+                cancelable: true,
+                composed: true
+              }));
+              
+              // keyup 事件
+              setTimeout(() => {
+                const upEvent = new KeyboardEvent('keyup', { 
+                  key: 'Enter', 
+                  code: 'Enter',
+                  keyCode: 13, 
+                  which: 13,
+                  bubbles: true,
+                  composed: true
+                });
+                sendInput.dispatchEvent(upEvent);
+                document.dispatchEvent(upEvent);
+                console.log('[Google AI] ✓ 发送完成');
+              }, 50);
+              
+              // 备选：如果 Enter 键没有触发发送，尝试点击发送按钮
+              setTimeout(() => {
+                const sendSelectors = '${config.sendSelector}'.split(', ');
+                for (const selector of sendSelectors) {
+                  try {
+                    const btn = document.querySelector(selector);
+                    if (btn && btn.offsetParent !== null && !btn.disabled) {
+                      console.log('[Google AI] 尝试点击发送按钮:', selector);
+                      btn.click();
+                      break;
+                    }
+                  } catch(e) {}
+                }
+              }, 200);
+              
+              // 发送后自动滚动到底部，确保能看到 AI 的回答
+              // 设置全局标记，表示当前正在对话中（用于区分新建对话首页和对话中）
+              window.__googleAIScrollActive = true;
+              // 每次发送消息时生成唯一ID，页面导航后旧的滚动逻辑自动失效
+              var scrollSessionId = Date.now();
+              window.__googleAIScrollSession = scrollSessionId;
+              
+              function forceScrollToBottom() {
+                // 如果滚动会话已过期（页面已导航到新对话），停止滚动
+                if (window.__googleAIScrollSession !== scrollSessionId) {
+                  console.log('[Google AI] 滚动会话已过期，停止滚动');
+                  return;
+                }
+                if (!window.__googleAIScrollActive) {
+                  console.log('[Google AI] 滚动已禁用，跳过');
+                  return;
+                }
+                
+                // 遍历所有元素，找到有 overflow 滚动的容器并滚动
+                var allElements = document.querySelectorAll('*');
+                for (var i = 0; i < allElements.length; i++) {
+                  var el = allElements[i];
+                  var style = window.getComputedStyle(el);
+                  var overflowY = style.overflowY;
+                  var isScrollable = (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay');
+                  if (isScrollable && el.scrollHeight > el.clientHeight + 50) {
+                    el.scrollTop = el.scrollHeight;
+                  }
+                }
+                
+                window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+                document.documentElement.scrollTop = document.documentElement.scrollHeight;
+                document.body.scrollTop = document.body.scrollHeight;
+              }
+              
+              // 使用 MutationObserver 监听 DOM 变化，自动滚动（仅在对话期间）
+              var scrollObserver = null;
+              var scrollTimer = null;
+              try {
+                scrollObserver = new MutationObserver(function() {
+                  if (window.__googleAIScrollSession !== scrollSessionId || !window.__googleAIScrollActive) {
+                    scrollObserver.disconnect();
+                    return;
+                  }
+                  if (scrollTimer) cancelAnimationFrame(scrollTimer);
+                  scrollTimer = requestAnimationFrame(function() {
+                    forceScrollToBottom();
+                  });
+                });
+                
+                scrollObserver.observe(document.body, {
+                  childList: true,
+                  subtree: true,
+                  characterData: true
+                });
+                
+                console.log('[Google AI] MutationObserver 已启动（会话ID:', scrollSessionId, '）');
+                
+                // 15秒后停止观察
+                setTimeout(function() {
+                  if (scrollObserver) {
+                    scrollObserver.disconnect();
+                    console.log('[Google AI] MutationObserver 已停止');
+                  }
+                }, 15000);
+              } catch(e) {
+                console.error('[Google AI] MutationObserver 创建失败:', e);
+              }
+              
+              // 定时滚动作为备选（也检查会话ID）
+              [500, 1000, 1500, 2000, 3000, 5000, 8000].forEach(function(delay) {
+                setTimeout(function() {
+                  if (window.__googleAIScrollSession === scrollSessionId && window.__googleAIScrollActive) {
+                    forceScrollToBottom();
+                  }
+                }, delay);
+              });
+              
+            }, 150);  // 等待框架处理输入
+          }, 100);  // 等待焦点生效
+        }
+        
+        return true;
+      } catch (error) {
+        console.error('[Google AI] 脚本执行异常:', error);
+        return false;
+      }
+    })();
+  `;
+}
+
 // 生成发送消息的 JavaScript 代码
 function generateSendScript(text: string, config: { inputSelector: string; sendSelector: string; inputMethod: string; useEnterToSend?: boolean }) {
+  // Google AI 使用专用脚本
+  if (config.inputMethod === 'google') {
+    return generateGoogleSendScript(text, config);
+  }
+  
   return `
     (function() {
       try {
@@ -298,7 +591,7 @@ function generateSendScript(text: string, config: { inputSelector: string; sendS
       
         // 处理输入框内容
         if ('${config.inputMethod}' === 'innerText' || isContentEditable) {
-          // 对于 contenteditable 元素（如 Kimi 使用的 Slate 编辑器和 Google AI）
+          // 对于 contenteditable 元素（如 Kimi 使用的 Slate 编辑器）
           console.log('处理 contenteditable 元素');
           
           // 清空并直接设置文本内容
@@ -709,15 +1002,125 @@ const ChatColumn = ({
   const [showDropdown, setShowDropdown] = useState(false);
   const webviewRef = useRef<HTMLElement>(null);
   
-  // 注册 webview 引用
+  // 注册 webview 引用，并为 Google AI 注入样式
   useEffect(() => {
     if (webviewRef.current) {
       onWebviewRef?.(aiId, webviewRef.current);
+      
+      // 为 Google AI 的 webview 注入 CSS，确保输入框可见
+      const webview = webviewRef.current as any;
+      const isGoogleAI = title === 'Google AI' || title === 'Google';
+      
+      if (isGoogleAI && webview.addEventListener) {
+        const injectGoogleCSS = () => {
+          try {
+            // 注入 CSS 让 Google AI 页面紧凑显示，确保输入框在可视区域内
+            webview.insertCSS(`
+              /* 让整个页面使用 flex 布局，内容自适应视口高度 */
+              html, body {
+                height: 100vh !important;
+                max-height: 100vh !important;
+                overflow: hidden !important;
+                margin: 0 !important;
+                padding: 0 !important;
+              }
+              
+              /* 隐藏页脚、底部链接等不必要元素 */
+              footer, #footer, .footer,
+              #fbar, .fbar,
+              [data-ogsr], [data-ved] > .card-section,
+              .o3j99.n1xJcf.Ne6nSd,
+              .KxwPGc,
+              #botstuff {
+                display: none !important;
+              }
+              
+              /* 减少顶部导航栏的高度 */
+              #searchform, .sfbg {
+                padding-top: 4px !important;
+                padding-bottom: 4px !important;
+              }
+              
+              /* Google AI 模式首页 - 让内容居中且紧凑 */
+              .eqAnXb, .o3j99, .GyAeWb, .RNNXgb,
+              [role="main"], main, .main {
+                max-height: 100vh !important;
+              }
+              
+              /* 缩减 Google AI 首页大间距 */
+              .SDkEP, .aajZCb, .A8SBwf, .lJ9FBc,
+              .UUbT9, .logo-subtext {
+                margin-top: 4px !important;
+                margin-bottom: 4px !important;
+                padding-top: 4px !important;
+                padding-bottom: 4px !important;
+              }
+              
+              /* 缩小 Google logo 区域 */
+              .k1zIA, .lnXdpd, .jfN4p {
+                height: auto !important;
+                max-height: 60px !important;
+                padding: 4px !important;
+              }
+              .lnXdpd img, .k1zIA img, .jfN4p img {
+                max-height: 40px !important;
+              }
+              
+              /* 确保搜索框/输入区域始终可见 */
+              .RNNXgb, .SDkEP, .a4bIc,
+              form[role="search"], [role="search"],
+              textarea, input[type="text"],
+              div[role="textbox"] {
+                position: relative !important;
+                z-index: 10 !important;
+              }
+            `).catch(() => {});
+            
+            // 同时执行 JS 滚动到输入框位置
+            webview.executeJavaScript(`
+              (function() {
+                // 延迟执行，等待页面渲染完成
+                setTimeout(function() {
+                  // 查找输入框并滚动到可见位置
+                  var input = document.querySelector('textarea, div[role="textbox"], input[type="text"], .RNNXgb');
+                  if (input) {
+                    input.scrollIntoView({ block: 'center', behavior: 'instant' });
+                  }
+                  // 同时尝试滚动到页面顶部（Google AI 首页输入框通常在中间偏上）
+                  window.scrollTo(0, 0);
+                }, 500);
+              })();
+            `).catch(() => {});
+          } catch (e) {
+            console.error('注入 Google AI CSS 失败:', e);
+          }
+        };
+        
+        const handleDomReady = () => {
+          injectGoogleCSS();
+        };
+        
+        // 页面导航后也需要重新注入
+        const handleDidNavigate = () => {
+          setTimeout(injectGoogleCSS, 300);
+        };
+        
+        webview.addEventListener('dom-ready', handleDomReady);
+        webview.addEventListener('did-navigate', handleDidNavigate);
+        webview.addEventListener('did-navigate-in-page', handleDidNavigate);
+        
+        return () => {
+          onWebviewRef?.(aiId, null);
+          webview.removeEventListener('dom-ready', handleDomReady);
+          webview.removeEventListener('did-navigate', handleDidNavigate);
+          webview.removeEventListener('did-navigate-in-page', handleDidNavigate);
+        };
+      }
     }
     return () => {
       onWebviewRef?.(aiId, null);
     };
-  }, [aiId, onWebviewRef]);
+  }, [aiId, onWebviewRef, title]);
   
   // 获取可切换的AI列表（排除当前显示的，按激活状态排序：激活的在前面）
   const availableAIs = allAIs
@@ -1029,19 +1432,54 @@ function App() {
     }
   };
 
-  // 历史会话数据和当前选中
-  const [conversations, setConversations] = useState<Conversation[]>([
-    { 
-      id: 1, 
-      text: "新会话 1...", 
-      pinned: false, 
-      activeAIIds: [1, 2, 3, 4],  // 默认开启的 AI
-      messages: [],
-      aiUrls: [],  // 各 AI 的对话链接
-      createdAt: Date.now()
-    },
-  ]);
-  const [activeConversationId, setActiveConversationId] = useState(1);
+  // 历史会话数据和当前选中 - 从 localStorage 加载
+  const [conversations, setConversations] = useState<Conversation[]>(() => {
+    try {
+      const saved = localStorage.getItem('conversations');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.error('加载会话列表失败:', e);
+    }
+    return [
+      { 
+        id: 1, 
+        text: "新会话 1...", 
+        pinned: false, 
+        activeAIIds: [1, 2, 3, 4],  // 默认开启的 AI: Google AI, DeepSeek, Kimi, 智谱AI
+        messages: [],
+        aiUrls: [],
+        createdAt: Date.now()
+      },
+    ];
+  });
+  const [activeConversationId, setActiveConversationId] = useState(() => {
+    try {
+      const saved = localStorage.getItem('activeConversationId');
+      if (saved) return parseInt(saved, 10);
+    } catch (e) {}
+    return 1;
+  });
+
+  // 会话数据变化时保存到 localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('conversations', JSON.stringify(conversations));
+    } catch (e) {
+      console.error('保存会话列表失败:', e);
+    }
+  }, [conversations]);
+
+  // 当前活跃会话 ID 变化时保存
+  useEffect(() => {
+    try {
+      localStorage.setItem('activeConversationId', String(activeConversationId));
+    } catch (e) {}
+  }, [activeConversationId]);
   const [showActionsId, setShowActionsId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editValue, setEditValue] = useState('');
@@ -1115,12 +1553,39 @@ function App() {
   // AI列表相关状态
   const [showAIList, setShowAIList] = useState(false);
   const [showAddAIModal, setShowAddAIModal] = useState(false);
-  const [aiList, setAiList] = useState([
-    { id: 1, name: 'DeepSeek', url: 'https://chat.deepseek.com/', active: true, displayOrder: 1 },
-    { id: 2, name: '豆包', url: 'https://www.doubao.com/chat/', active: true, displayOrder: 2 },
+  // 默认 AI 列表
+  const DEFAULT_AI_LIST = [
+    { id: 1, name: 'Google AI', url: 'https://www.google.com/search?udm=50', active: true, displayOrder: 1 },
+    { id: 2, name: 'DeepSeek', url: 'https://chat.deepseek.com/', active: true, displayOrder: 2 },
     { id: 3, name: 'Kimi', url: 'https://kimi.moonshot.cn/', active: true, displayOrder: 3 },
     { id: 4, name: '智谱AI', url: 'https://chatglm.cn/main/alltoolsdetail', active: true, displayOrder: 4 },
-  ]);
+    { id: 5, name: '豆包', url: 'https://www.doubao.com/chat/', active: false, displayOrder: 0 },
+  ];
+
+  // 从 localStorage 加载 AI 列表，如果没有则使用默认值
+  const [aiList, setAiList] = useState(() => {
+    try {
+      const saved = localStorage.getItem('aiList');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.error('加载 AI 列表失败:', e);
+    }
+    return DEFAULT_AI_LIST;
+  });
+
+  // AI 列表变化时保存到 localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('aiList', JSON.stringify(aiList));
+    } catch (e) {
+      console.error('保存 AI 列表失败:', e);
+    }
+  }, [aiList]);
   
   // 向所有活跃的 AI 发送消息
   const sendToAllAIs = useCallback(async (text: string) => {
