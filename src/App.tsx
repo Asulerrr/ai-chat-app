@@ -518,6 +518,139 @@ function generateGoogleSendScript(text: string, config: { inputSelector: string;
   `;
 }
 
+// 生成仅填入文本（不发送）的 JavaScript 代码
+// 用于在文件上传/解析期间先让用户看到文本已填入输入框
+function generateFillTextScript(text: string, config: { inputSelector: string; sendSelector: string; inputMethod: string; useEnterToSend?: boolean }) {
+  // Google AI 使用专用处理
+  if (config.inputMethod === 'google') {
+    return `
+      (function() {
+        try {
+          const text = ${JSON.stringify(text)};
+          console.log('[FillText] Google AI 填入文本...');
+          
+          function findInput() {
+            const selectors = [
+              'div[role="textbox"][contenteditable="true"]',
+              'div[contenteditable="true"][aria-label]',
+              'div[contenteditable="true"]',
+              'textarea',
+              'input[type="text"]'
+            ];
+            for (const selector of selectors) {
+              try {
+                const elements = document.querySelectorAll(selector);
+                for (const el of elements) {
+                  if (el && el.offsetParent !== null && !el.closest('[aria-hidden="true"]')) {
+                    return el;
+                  }
+                }
+              } catch(e) {}
+            }
+            return null;
+          }
+          
+          let input = findInput();
+          if (!input) return false;
+          
+          input.focus();
+          input.click();
+          
+          const isContentEditable = input.contentEditable === 'true' || input.isContentEditable;
+          if (isContentEditable) {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(input);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            document.execCommand('delete', false);
+            document.execCommand('insertText', false, text);
+          } else {
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set 
+              || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+            if (nativeSetter) nativeSetter.call(input, text);
+            else input.value = text;
+            input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          }
+          
+          console.log('[FillText] ✓ Google AI 文本已填入');
+          return true;
+        } catch(e) {
+          console.error('[FillText] Google AI 填入失败:', e);
+          return false;
+        }
+      })();
+    `;
+  }
+
+  return `
+    (function() {
+      try {
+        const text = ${JSON.stringify(text)};
+        console.log('[FillText] 开始填入文本（不发送）...');
+        
+        const selectors = '${config.inputSelector}'.split(', ');
+        let input = null;
+        for (const selector of selectors) {
+          try {
+            const el = document.querySelector(selector);
+            if (el && el.offsetParent !== null) {
+              input = el;
+              break;
+            }
+          } catch(e) {}
+        }
+        
+        if (!input) {
+          console.error('[FillText] ✗ 未找到输入框');
+          return false;
+        }
+        
+        input.focus();
+        input.click();
+        
+        const isContentEditable = input.contentEditable === 'true' || input.isContentEditable;
+        
+        if ('${config.inputMethod}' === 'innerText' || isContentEditable) {
+          input.innerHTML = '';
+          const textNode = document.createTextNode(text);
+          input.appendChild(textNode);
+          
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(input);
+          range.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          
+          input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: text, inputType: 'insertText' }));
+        } else {
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set 
+            || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+          
+          if (nativeInputValueSetter) {
+            nativeInputValueSetter.call(input, text);
+          } else {
+            input.value = text;
+          }
+          
+          input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: text, inputType: 'insertText' }));
+        }
+        
+        console.log('[FillText] ✓ 文本已填入输入框');
+        return true;
+      } catch (error) {
+        console.error('[FillText] 填入文本异常:', error);
+        return false;
+      }
+    })();
+  `;
+}
+
 // 生成发送消息的 JavaScript 代码
 function generateSendScript(text: string, config: { inputSelector: string; sendSelector: string; inputMethod: string; useEnterToSend?: boolean }) {
   // Google AI 使用专用脚本
@@ -1482,6 +1615,7 @@ function App() {
     }
   }, []);
 
+
   const handleSendClick = async () => {
     const hasAttachments = attachedFiles.length > 0;
     if (!inputValue.trim() && !hasAttachments) {
@@ -1495,6 +1629,7 @@ function App() {
       const text = inputValue.trim();
       const currentFiles = [...attachedFiles];
       const imageFiles = currentFiles.filter(f => f.isImage);
+      const nonImageFiles = currentFiles.filter(f => !f.isImage);
       setInputValue('');
       setAttachedFiles([]);
       setIsSending(true);
@@ -1510,7 +1645,6 @@ function App() {
       setConversations(prev => prev.map(c => {
         if (c.id === activeConversationId) {
           const updatedMessages = [...c.messages, newMessage];
-          // 如果是新会话（标题以"新会话"开头），更新标题为第一条消息
           const newTitle = c.text.startsWith('新会话') 
             ? (text.length > 30 ? text.substring(0, 30) + '...' : text)
             : c.text;
@@ -1520,34 +1654,25 @@ function App() {
       }));
       
       try {
-        // 先发送非图片文件（如果有）
-        const nonImageFiles = currentFiles.filter(f => !f.isImage);
-        if (nonImageFiles.length > 0) {
-          console.log(`[handleSendClick] 发送 ${nonImageFiles.length} 个文件...`);
-          await sendFilesToAllAIs(nonImageFiles);
-          await new Promise(resolve => setTimeout(resolve, 800));
-        }
+        const activeAIs = aiList.filter(ai => ai.active);
         
-        // 再发送图片（如果有）
-        if (imageFiles.length > 0) {
-          console.log(`[handleSendClick] 发送 ${imageFiles.length} 张图片...`);
-          await sendImagesToAllAIs(imageFiles.map(f => f.dataURL));
-          await new Promise(resolve => setTimeout(resolve, 800));
-        }
+        // 每个 AI 独立并行执行完整的发送流程
+        // 各 AI 独立等待自己的文件解析完成后立即发送，无需等待其他 AI
+        const sendPromises = activeAIs.map(ai => 
+          sendToSingleAI(ai, text, nonImageFiles, imageFiles)
+        );
         
-        // 发送文本消息
-        if (text) {
-          await sendToAllAIs(text);
-        }
+        // 等待所有 AI 完成（但各 AI 之间互不阻塞）
+        await Promise.allSettled(sendPromises);
         
-        // 延迟一段时间后捕获各 AI 的对话 URL（等待 AI 网站生成对话链接）
+        // 延迟一段时间后捕获各 AI 的对话 URL
         const currentConvId = activeConversationId;
         setTimeout(() => {
           const urls: AISessionUrl[] = [];
           webviewRefsMap.current.forEach((webview, aiId) => {
             if (webview && 'getURL' in webview) {
               try {
-                // @ts-ignore - getURL 是 Electron webview 的方法
+                // @ts-ignore
                 const url = webview.getURL();
                 if (url) {
                   urls.push({ aiId, url });
@@ -1566,11 +1691,10 @@ function App() {
                 : c
             ));
           }
-        }, 2000);  // 等待 2 秒让 AI 网站生成对话链接
+        }, 2000);
         
       } finally {
         setIsSending(false);
-        // 发送完成后自动聚焦输入框，方便用户继续输入
         setTimeout(() => inputRef.current?.focus(), 100);
       }
     }
@@ -1740,140 +1864,159 @@ function App() {
     }
   }, [aiList]);
   
-  // 向所有活跃的 AI 发送消息
-  const sendToAllAIs = useCallback(async (text: string) => {
-    const activeAIs = aiList.filter(ai => ai.active);
-    
-    console.log(`[sendToAllAIs] 开始向 ${activeAIs.length} 个 AI 发送消息`);
-    console.log(`[sendToAllAIs] 活跃的 AI:`, activeAIs.map(ai => ({ id: ai.id, name: ai.name })));
-    
-    for (const ai of activeAIs) {
-      const webview = webviewRefsMap.current.get(ai.id);
-      console.log(`[sendToAllAIs] 检查 AI ${ai.name} (ID: ${ai.id}):`, {
-        webviewExists: !!webview,
-        hasExecuteJavaScript: webview ? 'executeJavaScript' in webview : false,
-        webviewType: webview ? typeof webview : 'undefined'
-      });
-      
-      if (webview && 'executeJavaScript' in webview) {
-        const config = getAIInputConfig(ai.name);
-        const script = generateSendScript(text, config);
-        try {
-          console.log(`[sendToAllAIs] 向 ${ai.name} 执行脚本...`);
-          // @ts-ignore - executeJavaScript 是 Electron webview 的方法
-          const result = await webview.executeJavaScript(script);
-          console.log(`[sendToAllAIs] ✓ 已向 ${ai.name} 发送消息`, result);
-        } catch (error) {
-          console.error(`[sendToAllAIs] ✗ 向 ${ai.name} 发送消息失败:`, error);
-        }
-      } else {
-        console.warn(`[sendToAllAIs] ✗ AI ${ai.name} (ID: ${ai.id}) 的 webview 未找到或不支持 executeJavaScript`);
-        if (webview) {
-          console.warn(`[sendToAllAIs] webview 对象:`, Object.keys(webview));
-        }
-      }
+
+  // 检查单个 AI webview 中文件是否已完成解析
+  // 通过检测页面中的加载指示器、进度条、disabled 状态等判断
+  const checkFileParsingComplete = useCallback(async (webview: HTMLElement, aiName: string): Promise<boolean> => {
+    try {
+      const checkScript = `
+        (function() {
+          // 通用检测策略：检查是否存在文件解析/上传中的指示器
+          
+          // 1. 检查是否有 loading/spinner/progress 元素（文件正在解析中）
+          var loadingSelectors = [
+            // 通用加载指示器
+            '[class*="loading"]', '[class*="spinner"]', '[class*="progress"]',
+            '[class*="uploading"]', '[class*="parsing"]', '[class*="processing"]',
+            // 文件卡片中的加载状态
+            '[class*="file"] [class*="loading"]', '[class*="file"] [class*="spinner"]',
+            '[class*="attachment"] [class*="loading"]', '[class*="attachment"] [class*="spinner"]',
+            // 进度条
+            'progress', '[role="progressbar"]',
+            // 动画旋转图标（常见的加载指示）
+            '[class*="animate-spin"]', '[class*="rotating"]',
+            // DeepSeek 特有的文件解析状态
+            '[class*="file-item"] [class*="loading"]',
+            '[class*="file-card"] [class*="loading"]',
+            // Kimi 特有
+            '[class*="file-status"][class*="loading"]',
+            '[class*="upload-progress"]'
+          ];
+          
+          for (var i = 0; i < loadingSelectors.length; i++) {
+            try {
+              var els = document.querySelectorAll(loadingSelectors[i]);
+              for (var j = 0; j < els.length; j++) {
+                var el = els[j];
+                // 确保元素可见且在输入区域附近
+                if (el && el.offsetParent !== null) {
+                  var rect = el.getBoundingClientRect();
+                  // 排除非常小的元素（可能是其他UI组件的loading）
+                  if (rect.width > 5 && rect.height > 5) {
+                    console.log('[checkParsing] 发现加载指示器:', loadingSelectors[i], 'size:', rect.width, 'x', rect.height);
+                    return false;  // 仍在解析中
+                  }
+                }
+              }
+            } catch(e) {}
+          }
+          
+          // 2. 检查发送按钮是否被禁用（文件解析期间通常会禁用发送按钮）
+          var sendBtnSelectors = [
+            'button[disabled][class*="send"]',
+            'button[disabled][type="submit"]',
+            'div[class*="send"][class*="disabled"]',
+            'button[class*="send"][aria-disabled="true"]',
+            // DeepSeek 的发送按钮
+            'div[class*="chat-input"] button[disabled]',
+            // 通用禁用状态
+            'button[class*="send"]:disabled'
+          ];
+          
+          for (var i = 0; i < sendBtnSelectors.length; i++) {
+            try {
+              var btn = document.querySelector(sendBtnSelectors[i]);
+              if (btn && btn.offsetParent !== null) {
+                console.log('[checkParsing] 发送按钮被禁用:', sendBtnSelectors[i]);
+                return false;  // 发送按钮禁用，可能在解析中
+              }
+            } catch(e) {}
+          }
+          
+          // 3. 检查是否有"解析中"、"上传中"等文本提示
+          var statusTexts = ['解析中', '上传中', '处理中', '正在解析', '正在上传', '正在处理', 
+                            'parsing', 'uploading', 'processing', 'analyzing'];
+          var allText = document.body.innerText || '';
+          var lowerText = allText.toLowerCase();
+          
+          // 只检查最近出现的状态文本（在输入区域附近）
+          var inputArea = document.querySelector('[class*="chat-input"], [class*="input-area"], [class*="composer"], [class*="editor-container"]');
+          if (inputArea) {
+            var areaText = (inputArea.innerText || '').toLowerCase();
+            for (var i = 0; i < statusTexts.length; i++) {
+              if (areaText.includes(statusTexts[i].toLowerCase())) {
+                console.log('[checkParsing] 发现状态文本:', statusTexts[i]);
+                return false;  // 仍在解析中
+              }
+            }
+          }
+          
+          // 4. 检查文件卡片是否显示完成状态（有文件名但没有loading）
+          var fileCards = document.querySelectorAll('[class*="file-item"], [class*="file-card"], [class*="attachment-item"], [class*="upload-item"]');
+          for (var i = 0; i < fileCards.length; i++) {
+            var card = fileCards[i];
+            if (card && card.offsetParent !== null) {
+              // 检查卡片内是否有loading子元素
+              var hasLoading = card.querySelector('[class*="loading"], [class*="spinner"], [class*="progress"], [class*="animate"]');
+              if (hasLoading && hasLoading.offsetParent !== null) {
+                console.log('[checkParsing] 文件卡片中有加载指示器');
+                return false;
+              }
+            }
+          }
+          
+          console.log('[checkParsing] ✓ 未发现解析中的指示器，文件可能已就绪');
+          return true;  // 没有发现解析中的指示器
+        })();
+      `;
+      // @ts-ignore
+      const result = await webview.executeJavaScript(checkScript);
+      return result === true;
+    } catch (error) {
+      console.error(`[checkParsing] 检查 ${aiName} 文件解析状态失败:`, error);
+      return true; // 出错时假设已完成，避免无限等待
     }
-  }, [aiList]);
-  
-  // 向所有 AI 发送图片（通过剪贴板粘贴方式）
-  const sendImagesToAllAIs = useCallback(async (images: string[]) => {
-    const activeAIs = aiList.filter(ai => ai.active);
-    
-    for (const imageDataURL of images) {
-      for (const ai of activeAIs) {
-        const webview = webviewRefsMap.current.get(ai.id);
-        if (webview && 'executeJavaScript' in webview) {
-          await pasteImageToWebview(webview, imageDataURL, ai.name);
-          // 每个 AI 之间稍微等待，避免剪贴板冲突
-          await new Promise(resolve => setTimeout(resolve, 300));
-        }
-      }
-    }
-  }, [aiList, pasteImageToWebview]);
+  }, []);
+
 
   // 向单个 AI webview 上传文件（通过在 webview 中模拟文件选择）
+  // 修复：使用顺序尝试策略，避免多种方法同时触发导致文件重复上传
   const uploadFileToWebview = useCallback(async (webview: HTMLElement, file: AttachedFile, aiName: string) => {
     try {
       console.log(`[uploadFile] 开始上传文件到 ${aiName}: ${file.name} (${formatFileSize(file.size)})`);
       
       const config = getAIInputConfig(aiName);
       
-      // 策略：在 webview 中找到文件上传按钮/区域，触发点击
-      // 然后通过 dataTransfer 模拟文件拖放到输入区域
+      // 策略：按优先级顺序尝试不同的上传方式，成功一种后立即停止
+      // 优先级：1. 设置隐藏的 file input（最可靠）→ 2. 模拟拖放事件（备选）
+      // 关键：不能同时使用多种方式，否则会导致重复上传（如 DeepSeek 会生成2份文件）
       const uploadScript = `
         (function() {
-          try {
-            console.log('[uploadFile] 开始在 ${aiName} 中上传文件: ${file.name}');
-            
-            // 将 base64 dataURL 转换为 File 对象
-            function dataURLtoFile(dataurl, filename) {
-              var arr = dataurl.split(',');
-              var mime = arr[0].match(/:(.*?);/)[1];
-              var bstr = atob(arr[1]);
-              var n = bstr.length;
-              var u8arr = new Uint8Array(n);
-              while(n--) {
-                u8arr[n] = bstr.charCodeAt(n);
-              }
-              return new File([u8arr], filename, { type: mime });
-            }
-            
-            var file = dataURLtoFile(${JSON.stringify(file.dataURL)}, ${JSON.stringify(file.name)});
-            console.log('[uploadFile] 文件对象已创建:', file.name, file.size, file.type);
-            
-            // 查找输入框区域
-            var inputSelectors = '${config.inputSelector}'.split(', ');
-            var inputEl = null;
-            for (var i = 0; i < inputSelectors.length; i++) {
-              try {
-                var el = document.querySelector(inputSelectors[i]);
-                if (el && el.offsetParent !== null) {
-                  inputEl = el;
-                  break;
+          return new Promise(function(resolve) {
+            try {
+              console.log('[uploadFile] 开始在 ${aiName} 中上传文件: ${file.name}');
+              
+              // 将 base64 dataURL 转换为 File 对象
+              function dataURLtoFile(dataurl, filename) {
+                var arr = dataurl.split(',');
+                var mime = arr[0].match(/:(.*?);/)[1];
+                var bstr = atob(arr[1]);
+                var n = bstr.length;
+                var u8arr = new Uint8Array(n);
+                while(n--) {
+                  u8arr[n] = bstr.charCodeAt(n);
                 }
-              } catch(e) {}
-            }
-            
-            // 也查找上传按钮（附件/回形针按钮）
-            var uploadBtnSelectors = [
-              'button[aria-label*="附件"]', 'button[aria-label*="上传"]', 'button[aria-label*="文件"]',
-              'button[aria-label*="attach"]', 'button[aria-label*="upload"]', 'button[aria-label*="file"]',
-              'button[data-testid*="attach"]', 'button[data-testid*="upload"]', 'button[data-testid*="file"]',
-              'div[class*="attach"] button', 'div[class*="upload"] button',
-              'label[for*="file"]', 'label[for*="upload"]',
-              'input[type="file"]'
-            ];
-            
-            var targetEl = inputEl || document.body;
-            
-            // 方法1: 模拟拖放事件（最通用的方式）
-            var dt = new DataTransfer();
-            dt.items.add(file);
-            
-            // 在输入区域触发 drop 事件
-            var dropTarget = inputEl || document.querySelector('[class*="chat"]') || document.querySelector('[class*="input"]') || document.body;
-            
-            // 先触发 dragenter 和 dragover
-            var dragEnterEvent = new DragEvent('dragenter', {
-              bubbles: true, cancelable: true, dataTransfer: dt
-            });
-            dropTarget.dispatchEvent(dragEnterEvent);
-            
-            var dragOverEvent = new DragEvent('dragover', {
-              bubbles: true, cancelable: true, dataTransfer: dt
-            });
-            dropTarget.dispatchEvent(dragOverEvent);
-            
-            // 触发 drop 事件
-            var dropEvent = new DragEvent('drop', {
-              bubbles: true, cancelable: true, dataTransfer: dt
-            });
-            dropTarget.dispatchEvent(dropEvent);
-            console.log('[uploadFile] ✓ 已触发 drop 事件到:', dropTarget.tagName, dropTarget.className?.substring(0, 50));
-            
-            // 方法2: 查找隐藏的 file input 并设置文件
-            setTimeout(function() {
+                return new File([u8arr], filename, { type: mime });
+              }
+              
+              var file = dataURLtoFile(${JSON.stringify(file.dataURL)}, ${JSON.stringify(file.name)});
+              console.log('[uploadFile] 文件对象已创建:', file.name, file.size, file.type);
+              
+              // 方法1（优先）: 查找隐藏的 file input 并设置文件
+              // 这是最可靠的方式，大多数 AI 网站都有隐藏的 file input
               var fileInputs = document.querySelectorAll('input[type="file"]');
+              var fileInputSuccess = false;
+              
               if (fileInputs.length > 0) {
                 for (var i = 0; i < fileInputs.length; i++) {
                   try {
@@ -1883,33 +2026,59 @@ function App() {
                     fi.files = newDt.files;
                     fi.dispatchEvent(new Event('change', { bubbles: true }));
                     fi.dispatchEvent(new Event('input', { bubbles: true }));
-                    console.log('[uploadFile] ✓ 已设置 file input:', i);
+                    console.log('[uploadFile] ✓ 方法1成功: 已设置 file input:', i);
+                    fileInputSuccess = true;
+                    break;  // 只设置第一个可用的 file input，避免重复
                   } catch(e) {
                     console.log('[uploadFile] file input 设置失败:', i, e.message);
                   }
                 }
               }
-            }, 300);
-            
-            // 方法3: 尝试点击上传按钮
-            setTimeout(function() {
-              for (var i = 0; i < uploadBtnSelectors.length; i++) {
+              
+              if (fileInputSuccess) {
+                resolve(true);
+                return;
+              }
+              
+              // 方法2（备选）: 模拟拖放事件
+              console.log('[uploadFile] 方法1未成功，尝试方法2: 模拟拖放...');
+              
+              // 查找输入框区域作为拖放目标
+              var inputSelectors = '${config.inputSelector}'.split(', ');
+              var inputEl = null;
+              for (var i = 0; i < inputSelectors.length; i++) {
                 try {
-                  var btn = document.querySelector(uploadBtnSelectors[i]);
-                  if (btn && btn.offsetParent !== null && btn.tagName !== 'INPUT') {
-                    console.log('[uploadFile] 找到上传按钮:', uploadBtnSelectors[i]);
-                    // 不自动点击，因为可能会打开系统文件对话框
+                  var el = document.querySelector(inputSelectors[i]);
+                  if (el && el.offsetParent !== null) {
+                    inputEl = el;
                     break;
                   }
                 } catch(e) {}
               }
-            }, 100);
-            
-            return true;
-          } catch(error) {
-            console.error('[uploadFile] 上传失败:', error);
-            return false;
-          }
+              
+              var dt = new DataTransfer();
+              dt.items.add(file);
+              
+              var dropTarget = inputEl || document.querySelector('[class*="chat"]') || document.querySelector('[class*="input"]') || document.body;
+              
+              // 触发完整的拖放事件序列
+              dropTarget.dispatchEvent(new DragEvent('dragenter', {
+                bubbles: true, cancelable: true, dataTransfer: dt
+              }));
+              dropTarget.dispatchEvent(new DragEvent('dragover', {
+                bubbles: true, cancelable: true, dataTransfer: dt
+              }));
+              dropTarget.dispatchEvent(new DragEvent('drop', {
+                bubbles: true, cancelable: true, dataTransfer: dt
+              }));
+              console.log('[uploadFile] ✓ 方法2: 已触发 drop 事件到:', dropTarget.tagName, dropTarget.className?.substring(0, 50));
+              
+              resolve(true);
+            } catch(error) {
+              console.error('[uploadFile] 上传失败:', error);
+              resolve(false);
+            }
+          });
         })();
       `;
       
@@ -1926,20 +2095,111 @@ function App() {
     }
   }, []);
 
-  // 向所有 AI 发送非图片文件
-  const sendFilesToAllAIs = useCallback(async (files: AttachedFile[]) => {
-    const activeAIs = aiList.filter(ai => ai.active);
+  // 向单个 AI 发送文本消息
+  const sendTextToSingleAI = useCallback(async (ai: { id: number; name: string; url: string }, text: string) => {
+    const webview = webviewRefsMap.current.get(ai.id);
+    if (webview && 'executeJavaScript' in webview) {
+      const config = getAIInputConfig(ai.name);
+      const script = generateSendScript(text, config);
+      try {
+        // @ts-ignore
+        const result = await webview.executeJavaScript(script);
+        console.log(`[sendText] ✓ 已向 ${ai.name} 发送文本`, result);
+      } catch (error) {
+        console.error(`[sendText] ✗ 向 ${ai.name} 发送文本失败:`, error);
+      }
+    }
+  }, []);
+
+  // 等待单个 AI 的文件解析完成
+  const waitForSingleAIParsingComplete = useCallback(async (ai: { id: number; name: string }, maxWaitMs: number = 60000): Promise<boolean> => {
+    const startTime = Date.now();
+    const pollInterval = 1500;
+    const initialDelay = 2000;
     
-    for (const file of files) {
-      for (const ai of activeAIs) {
-        const webview = webviewRefsMap.current.get(ai.id);
-        if (webview && 'executeJavaScript' in webview) {
+    console.log(`[waitForParsing] 等待 ${ai.name} 完成文件解析...`);
+    await new Promise(resolve => setTimeout(resolve, initialDelay));
+    
+    while (Date.now() - startTime < maxWaitMs) {
+      const webview = webviewRefsMap.current.get(ai.id);
+      if (webview && 'executeJavaScript' in webview) {
+        const isComplete = await checkFileParsingComplete(webview, ai.name);
+        if (isComplete) {
+          const elapsed = Date.now() - startTime;
+          console.log(`[waitForParsing] ✓ ${ai.name} 文件解析完成，耗时 ${elapsed}ms`);
+          return true;
+        }
+      } else {
+        return true;
+      }
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+    }
+    
+    console.warn(`[waitForParsing] ⚠ ${ai.name} 等待超时`);
+    return false;
+  }, [checkFileParsingComplete]);
+
+  // 单个 AI 的完整发送流程（独立运行：填入文本 → 上传文件 → 等待解析 → 发送）
+  const sendToSingleAI = useCallback(async (
+    ai: { id: number; name: string; url: string },
+    text: string,
+    nonImageFiles: AttachedFile[],
+    imageFiles: AttachedFile[]
+  ) => {
+    const webview = webviewRefsMap.current.get(ai.id);
+    if (!webview || !('executeJavaScript' in webview)) {
+      console.warn(`[sendToSingleAI] ${ai.name} webview 不可用`);
+      return;
+    }
+
+    try {
+      // 1. 先在输入框中显示文本（让用户看到文本已填入）
+      if (text) {
+        const config = getAIInputConfig(ai.name);
+        const fillTextScript = generateFillTextScript(text, config);
+        try {
+          // @ts-ignore
+          await webview.executeJavaScript(fillTextScript);
+          console.log(`[sendToSingleAI] ✓ 已在 ${ai.name} 输入框中填入文本`);
+        } catch (e) {
+          console.warn(`[sendToSingleAI] 填入文本到 ${ai.name} 失败:`, e);
+        }
+      }
+
+      // 2. 上传非图片文件
+      if (nonImageFiles.length > 0) {
+        for (const file of nonImageFiles) {
           await uploadFileToWebview(webview, file, ai.name);
           await new Promise(resolve => setTimeout(resolve, 300));
         }
+        // 等待该 AI 完成文件解析
+        await waitForSingleAIParsingComplete(ai, 60000);
       }
+
+      // 3. 上传图片
+      if (imageFiles.length > 0) {
+        for (const img of imageFiles) {
+          await pasteImageToWebview(webview, img.dataURL, ai.name);
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+        if (nonImageFiles.length === 0) {
+          await waitForSingleAIParsingComplete(ai, 30000);
+        }
+      }
+
+      // 4. 发送文本
+      if (text) {
+        await sendTextToSingleAI(ai, text);
+      } else if (nonImageFiles.length > 0 || imageFiles.length > 0) {
+        console.log(`[sendToSingleAI] ${ai.name}: 仅附件，无文本`);
+      }
+
+      console.log(`[sendToSingleAI] ✓ ${ai.name} 发送流程完成`);
+    } catch (error) {
+      console.error(`[sendToSingleAI] ✗ ${ai.name} 发送流程失败:`, error);
     }
-  }, [aiList, uploadFileToWebview]);
+  }, [uploadFileToWebview, pasteImageToWebview, waitForSingleAIParsingComplete, sendTextToSingleAI]);
+
 
   // 向所有 AI 发送新建对话命令
   const triggerNewChatInAllAIs = useCallback(async () => {
