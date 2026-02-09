@@ -449,25 +449,9 @@ function generateGoogleSendScript(text: string, config: { inputSelector: string;
                 }
               }, 200);
               
-              // 发送后自动滚动到底部，确保能看到 AI 的回答
-              // 设置全局标记，表示当前正在对话中（用于区分新建对话首页和对话中）
-              window.__googleAIScrollActive = true;
-              // 每次发送消息时生成唯一ID，页面导航后旧的滚动逻辑自动失效
-              var scrollSessionId = Date.now();
-              window.__googleAIScrollSession = scrollSessionId;
-              
-              function forceScrollToBottom() {
-                // 如果滚动会话已过期（页面已导航到新对话），停止滚动
-                if (window.__googleAIScrollSession !== scrollSessionId) {
-                  console.log('[Google AI] 滚动会话已过期，停止滚动');
-                  return;
-                }
-                if (!window.__googleAIScrollActive) {
-                  console.log('[Google AI] 滚动已禁用，跳过');
-                  return;
-                }
-                
-                // 遍历所有元素，找到有 overflow 滚动的容器并滚动
+              // 发送后短暂滚动到底部，之后不再强制滚动，让用户可以自由回看
+              setTimeout(function() {
+                // 找到可滚动容器并滚动到底部一次
                 var allElements = document.querySelectorAll('*');
                 for (var i = 0; i < allElements.length; i++) {
                   var el = allElements[i];
@@ -478,54 +462,8 @@ function generateGoogleSendScript(text: string, config: { inputSelector: string;
                     el.scrollTop = el.scrollHeight;
                   }
                 }
-                
                 window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-                document.documentElement.scrollTop = document.documentElement.scrollHeight;
-                document.body.scrollTop = document.body.scrollHeight;
-              }
-              
-              // 使用 MutationObserver 监听 DOM 变化，自动滚动（仅在对话期间）
-              var scrollObserver = null;
-              var scrollTimer = null;
-              try {
-                scrollObserver = new MutationObserver(function() {
-                  if (window.__googleAIScrollSession !== scrollSessionId || !window.__googleAIScrollActive) {
-                    scrollObserver.disconnect();
-                    return;
-                  }
-                  if (scrollTimer) cancelAnimationFrame(scrollTimer);
-                  scrollTimer = requestAnimationFrame(function() {
-                    forceScrollToBottom();
-                  });
-                });
-                
-                scrollObserver.observe(document.body, {
-                  childList: true,
-                  subtree: true,
-                  characterData: true
-                });
-                
-                console.log('[Google AI] MutationObserver 已启动（会话ID:', scrollSessionId, '）');
-                
-                // 15秒后停止观察
-                setTimeout(function() {
-                  if (scrollObserver) {
-                    scrollObserver.disconnect();
-                    console.log('[Google AI] MutationObserver 已停止');
-                  }
-                }, 15000);
-              } catch(e) {
-                console.error('[Google AI] MutationObserver 创建失败:', e);
-              }
-              
-              // 定时滚动作为备选（也检查会话ID）
-              [500, 1000, 1500, 2000, 3000, 5000, 8000].forEach(function(delay) {
-                setTimeout(function() {
-                  if (window.__googleAIScrollSession === scrollSessionId && window.__googleAIScrollActive) {
-                    forceScrollToBottom();
-                  }
-                }, delay);
-              });
+              }, 1000);
               
             }, 150);  // 等待框架处理输入
           }, 100);  // 等待焦点生效
@@ -1014,22 +952,11 @@ const ChatColumn = ({
       if (isGoogleAI && webview.addEventListener) {
         const injectGoogleCSS = () => {
           try {
-            // 注入 CSS 让 Google AI 页面紧凑显示，确保输入框在可视区域内
+            // 注入 CSS 让 Google AI 首页紧凑显示，但不影响对话模式的滚动
             webview.insertCSS(`
-              /* 让整个页面使用 flex 布局，内容自适应视口高度 */
-              html, body {
-                height: 100vh !important;
-                max-height: 100vh !important;
-                overflow: hidden !important;
-                margin: 0 !important;
-                padding: 0 !important;
-              }
-              
               /* 隐藏页脚、底部链接等不必要元素 */
               footer, #footer, .footer,
               #fbar, .fbar,
-              [data-ogsr], [data-ved] > .card-section,
-              .o3j99.n1xJcf.Ne6nSd,
               .KxwPGc,
               #botstuff {
                 display: none !important;
@@ -1039,12 +966,6 @@ const ChatColumn = ({
               #searchform, .sfbg {
                 padding-top: 4px !important;
                 padding-bottom: 4px !important;
-              }
-              
-              /* Google AI 模式首页 - 让内容居中且紧凑 */
-              .eqAnXb, .o3j99, .GyAeWb, .RNNXgb,
-              [role="main"], main, .main {
-                max-height: 100vh !important;
               }
               
               /* 缩减 Google AI 首页大间距 */
@@ -1065,29 +986,17 @@ const ChatColumn = ({
               .lnXdpd img, .k1zIA img, .jfN4p img {
                 max-height: 40px !important;
               }
-              
-              /* 确保搜索框/输入区域始终可见 */
-              .RNNXgb, .SDkEP, .a4bIc,
-              form[role="search"], [role="search"],
-              textarea, input[type="text"],
-              div[role="textbox"] {
-                position: relative !important;
-                z-index: 10 !important;
-              }
             `).catch(() => {});
             
-            // 同时执行 JS 滚动到输入框位置
+            // 执行 JS 滚动到输入框位置（仅首页）
             webview.executeJavaScript(`
               (function() {
-                // 延迟执行，等待页面渲染完成
                 setTimeout(function() {
                   // 查找输入框并滚动到可见位置
                   var input = document.querySelector('textarea, div[role="textbox"], input[type="text"], .RNNXgb');
                   if (input) {
                     input.scrollIntoView({ block: 'center', behavior: 'instant' });
                   }
-                  // 同时尝试滚动到页面顶部（Google AI 首页输入框通常在中间偏上）
-                  window.scrollTo(0, 0);
                 }, 500);
               })();
             `).catch(() => {});
@@ -1100,7 +1009,6 @@ const ChatColumn = ({
           injectGoogleCSS();
         };
         
-        // 页面导航后也需要重新注入
         const handleDidNavigate = () => {
           setTimeout(injectGoogleCSS, 300);
         };
