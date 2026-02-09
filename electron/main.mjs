@@ -1,7 +1,9 @@
 import electron from 'electron';
-const { app, BrowserWindow, session, shell, ipcMain, clipboard, nativeImage } = electron;
+const { app, BrowserWindow, session, shell, ipcMain, clipboard, nativeImage, dialog } = electron;
 import path from 'path';
 import http from 'http';
+import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -279,6 +281,94 @@ ipcMain.handle('clipboard-write-image', async (event, dataURL) => {
 ipcMain.handle('clipboard-clear', async () => {
   try {
     clipboard.clear();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// --- 文件操作 IPC 处理 ---
+// 临时文件目录
+const TEMP_DIR = path.join(os.tmpdir(), 'ai-chat-app-files');
+
+// 确保临时目录存在
+function ensureTempDir() {
+  if (!fs.existsSync(TEMP_DIR)) {
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
+  }
+  return TEMP_DIR;
+}
+
+// 将文件 buffer 保存到临时目录，返回文件路径
+ipcMain.handle('file-save-temp', async (event, { fileName, buffer }) => {
+  try {
+    const tempDir = ensureTempDir();
+    // 添加时间戳避免文件名冲突
+    const uniqueName = `${Date.now()}_${fileName}`;
+    const filePath = path.join(tempDir, uniqueName);
+    fs.writeFileSync(filePath, Buffer.from(buffer));
+    console.log('[File] 文件已保存到临时目录:', filePath);
+    return { success: true, filePath };
+  } catch (error) {
+    console.error('[File] 保存文件失败:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 打开文件选择对话框
+ipcMain.handle('file-open-dialog', async (event, options) => {
+  try {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { 
+          name: '支持的文件', 
+          extensions: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'csv', 'json', 'xml', 'html', 'css', 'js', 'ts', 'py', 'java', 'c', 'cpp', 'mp4', 'mp3', 'wav', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'zip', 'rar', '7z'] 
+        },
+        { name: '所有文件', extensions: ['*'] }
+      ],
+      ...options
+    });
+    
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true };
+    }
+    
+    // 读取每个文件的信息
+    const files = [];
+    for (const filePath of result.filePaths) {
+      const stat = fs.statSync(filePath);
+      if (stat.size > 100 * 1024 * 1024) {
+        // 单个文件超过 100MB，跳过
+        console.warn('[File] 文件过大，跳过:', filePath, stat.size);
+        continue;
+      }
+      const buffer = fs.readFileSync(filePath);
+      files.push({
+        name: path.basename(filePath),
+        size: stat.size,
+        path: filePath,
+        buffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+      });
+    }
+    
+    console.log('[File] 已选择文件:', files.map(f => f.name));
+    return { success: true, files };
+  } catch (error) {
+    console.error('[File] 打开文件对话框失败:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 清理临时文件
+ipcMain.handle('file-cleanup-temp', async () => {
+  try {
+    if (fs.existsSync(TEMP_DIR)) {
+      const files = fs.readdirSync(TEMP_DIR);
+      for (const file of files) {
+        fs.unlinkSync(path.join(TEMP_DIR, file));
+      }
+    }
     return { success: true };
   } catch (error) {
     return { success: false, error: error.message };

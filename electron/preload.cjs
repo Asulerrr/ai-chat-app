@@ -13,5 +13,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 剪贴板 API - 用于将图片写入系统剪贴板，以便粘贴到 AI webview
   writeImageToClipboard: (dataURL) => ipcRenderer.invoke('clipboard-write-image', dataURL),
-  clearClipboard: () => ipcRenderer.invoke('clipboard-clear')
+  clearClipboard: () => ipcRenderer.invoke('clipboard-clear'),
+
+  // 文件操作 API
+  saveFileToTemp: (fileName, buffer) => ipcRenderer.invoke('file-save-temp', { fileName, buffer }),
+  openFileDialog: (options) => ipcRenderer.invoke('file-open-dialog', options || {}),
+  cleanupTempFiles: () => ipcRenderer.invoke('file-cleanup-temp')
 });

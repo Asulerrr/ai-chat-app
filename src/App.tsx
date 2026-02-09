@@ -19,7 +19,9 @@ import {
   Pencil,
   Pin,
   Loader2,
-  Link
+  Link,
+  Paperclip,
+  FileText
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -49,6 +51,44 @@ interface Conversation {
   messages: Message[];  // 用户发送的消息列表
   aiUrls: AISessionUrl[];  // 各 AI 的对话链接
   createdAt: number;  // 创建时间
+}
+
+// --- 附件文件类型 ---
+interface AttachedFile {
+  name: string;
+  size: number;
+  type: string;       // MIME type
+  dataURL: string;    // base64 dataURL for images, or raw data for files
+  isImage: boolean;   // 是否为图片类型
+}
+
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_FILES = 10;
+
+// 格式化文件大小
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
+// 根据文件扩展名获取图标颜色
+function getFileIconColor(fileName: string): string {
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+  const colorMap: Record<string, string> = {
+    pdf: 'text-red-500',
+    doc: 'text-blue-500', docx: 'text-blue-500',
+    xls: 'text-green-600', xlsx: 'text-green-600',
+    ppt: 'text-orange-500', pptx: 'text-orange-500',
+    txt: 'text-gray-500', md: 'text-gray-500', csv: 'text-gray-500',
+    mp4: 'text-purple-500', mp3: 'text-purple-500', wav: 'text-purple-500',
+    zip: 'text-yellow-600', rar: 'text-yellow-600', '7z': 'text-yellow-600',
+    json: 'text-emerald-500', xml: 'text-emerald-500',
+    js: 'text-yellow-500', ts: 'text-blue-400', py: 'text-blue-500',
+    html: 'text-orange-500', css: 'text-blue-400',
+  };
+  return colorMap[ext] || 'text-gray-400';
 }
 
 // --- AI 输入配置 ---
@@ -1245,36 +1285,94 @@ function App() {
   const [inputValue, setInputValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   
-  // 粘贴的图片列表 (dataURL 格式)
-  const [pastedImages, setPastedImages] = useState<string[]>([]);
+  // 附件列表（图片+文件统一管理）
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
-  // 处理粘贴事件 - 捕获图片
+  // 处理粘贴事件 - 捕获图片和文件
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = e.clipboardData?.items;
     if (!items) return;
     
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      if (item.type.startsWith('image/')) {
-        e.preventDefault();
+      if (item.kind === 'file') {
         const file = item.getAsFile();
-        if (file) {
-          const reader = new FileReader();
-          reader.onload = (event) => {
-            const dataURL = event.target?.result as string;
-            if (dataURL) {
-              setPastedImages(prev => [...prev, dataURL]);
-            }
-          };
-          reader.readAsDataURL(file);
+        if (!file) continue;
+        if (file.size > MAX_FILE_SIZE) {
+          console.warn('[Paste] 文件过大，跳过:', file.name, file.size);
+          continue;
         }
+        e.preventDefault();
+        const isImage = item.type.startsWith('image/');
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const dataURL = event.target?.result as string;
+          if (dataURL) {
+            setAttachedFiles(prev => {
+              if (prev.length >= MAX_FILES) return prev;
+              return [...prev, { name: file.name, size: file.size, type: file.type, dataURL, isImage }];
+            });
+          }
+        };
+        reader.readAsDataURL(file);
       }
     }
   }, []);
 
-  // 移除粘贴的图片
-  const handleRemoveImage = useCallback((index: number) => {
-    setPastedImages(prev => prev.filter((_, i) => i !== index));
+  // 通过文件选择器添加文件
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (file.size > MAX_FILE_SIZE) continue;
+      const isImage = file.type.startsWith('image/');
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const dataURL = event.target?.result as string;
+        if (dataURL) {
+          setAttachedFiles(prev => {
+            if (prev.length >= MAX_FILES) return prev;
+            return [...prev, { name: file.name, size: file.size, type: file.type, dataURL, isImage }];
+          });
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+    // 重置 input 以允许重复选择同一文件
+    e.target.value = '';
+  }, []);
+
+  // 通过 Electron 文件对话框选择文件
+  const handleOpenFileDialog = useCallback(async () => {
+    // @ts-ignore
+    const result = await window.electronAPI?.openFileDialog();
+    if (result?.success && result.files) {
+      for (const file of result.files) {
+        const isImage = /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(file.name);
+        // 将 ArrayBuffer 转为 dataURL
+        const uint8 = new Uint8Array(file.buffer);
+        const blob = new Blob([uint8]);
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const dataURL = event.target?.result as string;
+          if (dataURL) {
+            setAttachedFiles(prev => {
+              if (prev.length >= MAX_FILES) return prev;
+              return [...prev, { name: file.name, size: file.size, type: '', dataURL, isImage }];
+            });
+          }
+        };
+        reader.readAsDataURL(blob);
+      }
+    }
+  }, []);
+
+  // 移除附件
+  const handleRemoveAttachment = useCallback((index: number) => {
+    setAttachedFiles(prev => prev.filter((_, i) => i !== index));
   }, []);
 
   // 向单个 AI webview 粘贴图片（通过系统剪贴板 + 模拟 Ctrl+V）
@@ -1374,19 +1472,20 @@ function App() {
   }, []);
 
   const handleSendClick = async () => {
-    const hasImages = pastedImages.length > 0;
-    if (!inputValue.trim() && !hasImages) {
+    const hasAttachments = attachedFiles.length > 0;
+    if (!inputValue.trim() && !hasAttachments) {
       // 无内容且无图片时抖动并显示提示
       setIsShaking(true);
       setShowInputHint(true);
       setTimeout(() => setIsShaking(false), 500);
       setTimeout(() => setShowInputHint(false), 2000);
     } else {
-      // 有内容或图片时发送到所有 AI
+      // 有内容或附件时发送到所有 AI
       const text = inputValue.trim();
-      const images = [...pastedImages];
+      const currentFiles = [...attachedFiles];
+      const imageFiles = currentFiles.filter(f => f.isImage);
       setInputValue('');
-      setPastedImages([]);
+      setAttachedFiles([]);
       setIsSending(true);
       
       // 创建新消息
@@ -1411,9 +1510,9 @@ function App() {
       
       try {
         // 先发送图片（如果有），再发送文本
-        if (images.length > 0) {
-          console.log(`[handleSendClick] 发送 ${images.length} 张图片...`);
-          await sendImagesToAllAIs(images);
+        if (imageFiles.length > 0) {
+          console.log(`[handleSendClick] 发送 ${imageFiles.length} 张图片...`);
+          await sendImagesToAllAIs(imageFiles.map(f => f.dataURL));
           // 图片发送后等待一段时间让 AI 处理
           await new Promise(resolve => setTimeout(resolve, 800));
         }
@@ -2250,8 +2349,8 @@ function App() {
               </GlassPanel>
 
               {/* Bottom Area: Input + Action Button */}
-              <div className={cn("shrink-0 flex gap-4", pastedImages.length > 0 ? "h-28" : "h-20")} style={{ transition: 'height 0.2s ease' }}>
-              {/* Input Bar - 支持粘贴图片 */}
+              <div className={cn("shrink-0 flex gap-4", attachedFiles.length > 0 ? "h-28" : "h-20")} style={{ transition: 'height 0.2s ease' }}>
+              {/* Input Bar - 支持粘贴图片和文件 */}
               <GlassPanel 
                 intensity="medium" 
                 darkMode={darkMode}
@@ -2260,21 +2359,40 @@ function App() {
                   darkMode ? "!bg-white/15" : "!bg-white/40"
                 )}
               >
-                  {/* 图片预览区域 */}
-                  {pastedImages.length > 0 && (
+                  {/* 附件预览区域（图片+文件） */}
+                  {attachedFiles.length > 0 && (
                     <div className="flex items-center gap-2 pt-2 overflow-x-auto custom-scrollbar">
-                      {pastedImages.map((img, index) => (
+                      {attachedFiles.map((file, index) => (
                         <div key={index} className="relative shrink-0 group">
-                          <img 
-                            src={img} 
-                            alt={`粘贴图片 ${index + 1}`}
-                            className={cn(
-                              "h-10 w-10 object-cover rounded-lg border",
-                              darkMode ? "border-white/20" : "border-emerald-200"
-                            )}
-                          />
+                          {file.isImage ? (
+                            <img 
+                              src={file.dataURL} 
+                              alt={file.name}
+                              className={cn(
+                                "h-10 w-10 object-cover rounded-lg border",
+                                darkMode ? "border-white/20" : "border-emerald-200"
+                              )}
+                            />
+                          ) : (
+                            <div className={cn(
+                              "h-10 flex items-center gap-1.5 px-2 rounded-lg border",
+                              darkMode ? "border-white/20 bg-white/5" : "border-emerald-200 bg-emerald-50/50"
+                            )}>
+                              <FileText size={14} className={getFileIconColor(file.name)} />
+                              <div className="flex flex-col max-w-[100px]">
+                                <span className={cn(
+                                  "text-[10px] font-medium truncate leading-tight",
+                                  darkMode ? "text-emerald-100" : "text-emerald-900"
+                                )}>{file.name}</span>
+                                <span className={cn(
+                                  "text-[9px] leading-tight",
+                                  darkMode ? "text-emerald-100/40" : "text-emerald-900/40"
+                                )}>{formatFileSize(file.size)}</span>
+                              </div>
+                            </div>
+                          )}
                           <button
-                            onClick={() => handleRemoveImage(index)}
+                            onClick={() => handleRemoveAttachment(index)}
                             className={cn(
                               "absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full flex items-center justify-center text-white opacity-0 group-hover:opacity-100 transition-opacity",
                               "bg-red-500 hover:bg-red-600"
@@ -2288,17 +2406,43 @@ function App() {
                         "text-[10px] shrink-0",
                         darkMode ? "text-emerald-100/30" : "text-emerald-900/30"
                       )}>
-                        Ctrl+V 粘贴图片
+                        {attachedFiles.length}/{MAX_FILES}
                       </span>
                     </div>
                   )}
                   
+                  {/* 隐藏的文件选择器 */}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.xml,.html,.css,.js,.ts,.py,.java,.c,.cpp,.mp4,.mp3,.wav,.png,.jpg,.jpeg,.gif,.webp,.svg,.zip,.rar,.7z"
+                    onChange={handleFileSelect}
+                    className="hidden"
+                  />
+                  
                   {/* 输入框行 */}
                   <div className="flex items-center gap-3 flex-1">
+                  {/* 附件按钮 */}
+                  <motion.button
+                    whileHover={{ scale: 1.1 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={handleOpenFileDialog}
+                    title={`上传文件 (最多${MAX_FILES}个，每个${formatFileSize(MAX_FILE_SIZE)})`}
+                    className={cn(
+                      "p-2 rounded-lg transition-colors shrink-0",
+                      darkMode 
+                        ? "text-emerald-200/60 hover:text-emerald-100 hover:bg-emerald-500/20" 
+                        : "text-emerald-800/60 hover:text-emerald-900 hover:bg-emerald-500/10"
+                    )}
+                  >
+                    <Paperclip size={18} />
+                  </motion.button>
+                  
                   <input 
                     ref={inputRef}
                     type="text" 
-                    placeholder={pastedImages.length > 0 ? "添加文字说明（可选）" : "问点难的，一问多答（支持 Ctrl+V 粘贴图片）"}
+                    placeholder={attachedFiles.length > 0 ? "添加文字说明（可选）" : "问点难的，一问多答（支持粘贴图片/文件）"}
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyDown={(e) => {
@@ -2347,7 +2491,7 @@ function App() {
                           "p-3 rounded-xl transition-all duration-300 cursor-pointer",
                           isSending
                             ? "text-gray-400 cursor-wait"
-                            : (inputValue.trim() || pastedImages.length > 0)
+                            : (inputValue.trim() || attachedFiles.length > 0)
                               ? darkMode 
                                 ? "text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/20" 
                                 : "text-emerald-600 hover:text-emerald-700 hover:bg-emerald-500/10"
