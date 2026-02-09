@@ -1345,29 +1345,40 @@ function App() {
     e.target.value = '';
   }, []);
 
-  // 通过 Electron 文件对话框选择文件
+  // 通过 Electron 文件对话框选择文件，如果不可用则回退到 HTML file input
   const handleOpenFileDialog = useCallback(async () => {
     // @ts-ignore
-    const result = await window.electronAPI?.openFileDialog();
-    if (result?.success && result.files) {
-      for (const file of result.files) {
-        const isImage = /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(file.name);
-        // 将 ArrayBuffer 转为 dataURL
-        const uint8 = new Uint8Array(file.buffer);
-        const blob = new Blob([uint8]);
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const dataURL = event.target?.result as string;
-          if (dataURL) {
-            setAttachedFiles(prev => {
-              if (prev.length >= MAX_FILES) return prev;
-              return [...prev, { name: file.name, size: file.size, type: '', dataURL, isImage }];
-            });
+    if (window.electronAPI?.openFileDialog) {
+      try {
+        // @ts-ignore
+        const result = await window.electronAPI.openFileDialog();
+        if (result?.success && result.files) {
+          for (const file of result.files) {
+            const isImage = /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(file.name);
+            const uint8 = new Uint8Array(file.buffer);
+            const blob = new Blob([uint8]);
+            const reader = new FileReader();
+            reader.onload = (event) => {
+              const dataURL = event.target?.result as string;
+              if (dataURL) {
+                setAttachedFiles(prev => {
+                  if (prev.length >= MAX_FILES) return prev;
+                  return [...prev, { name: file.name, size: file.size, type: '', dataURL, isImage }];
+                });
+              }
+            };
+            reader.readAsDataURL(blob);
           }
-        };
-        reader.readAsDataURL(blob);
+          return; // 成功选择了文件，直接返回
+        }
+        // 如果用户取消了对话框，也直接返回
+        if (result?.canceled) return;
+      } catch (e) {
+        console.warn('[handleOpenFileDialog] Electron 文件对话框失败，回退到 HTML input:', e);
       }
     }
+    // 回退：使用隐藏的 HTML file input
+    fileInputRef.current?.click();
   }, []);
 
   // 移除附件
@@ -1509,11 +1520,18 @@ function App() {
       }));
       
       try {
-        // 先发送图片（如果有），再发送文本
+        // 先发送非图片文件（如果有）
+        const nonImageFiles = currentFiles.filter(f => !f.isImage);
+        if (nonImageFiles.length > 0) {
+          console.log(`[handleSendClick] 发送 ${nonImageFiles.length} 个文件...`);
+          await sendFilesToAllAIs(nonImageFiles);
+          await new Promise(resolve => setTimeout(resolve, 800));
+        }
+        
+        // 再发送图片（如果有）
         if (imageFiles.length > 0) {
           console.log(`[handleSendClick] 发送 ${imageFiles.length} 张图片...`);
           await sendImagesToAllAIs(imageFiles.map(f => f.dataURL));
-          // 图片发送后等待一段时间让 AI 处理
           await new Promise(resolve => setTimeout(resolve, 800));
         }
         
@@ -1772,6 +1790,156 @@ function App() {
       }
     }
   }, [aiList, pasteImageToWebview]);
+
+  // 向单个 AI webview 上传文件（通过在 webview 中模拟文件选择）
+  const uploadFileToWebview = useCallback(async (webview: HTMLElement, file: AttachedFile, aiName: string) => {
+    try {
+      console.log(`[uploadFile] 开始上传文件到 ${aiName}: ${file.name} (${formatFileSize(file.size)})`);
+      
+      const config = getAIInputConfig(aiName);
+      
+      // 策略：在 webview 中找到文件上传按钮/区域，触发点击
+      // 然后通过 dataTransfer 模拟文件拖放到输入区域
+      const uploadScript = `
+        (function() {
+          try {
+            console.log('[uploadFile] 开始在 ${aiName} 中上传文件: ${file.name}');
+            
+            // 将 base64 dataURL 转换为 File 对象
+            function dataURLtoFile(dataurl, filename) {
+              var arr = dataurl.split(',');
+              var mime = arr[0].match(/:(.*?);/)[1];
+              var bstr = atob(arr[1]);
+              var n = bstr.length;
+              var u8arr = new Uint8Array(n);
+              while(n--) {
+                u8arr[n] = bstr.charCodeAt(n);
+              }
+              return new File([u8arr], filename, { type: mime });
+            }
+            
+            var file = dataURLtoFile(${JSON.stringify(file.dataURL)}, ${JSON.stringify(file.name)});
+            console.log('[uploadFile] 文件对象已创建:', file.name, file.size, file.type);
+            
+            // 查找输入框区域
+            var inputSelectors = '${config.inputSelector}'.split(', ');
+            var inputEl = null;
+            for (var i = 0; i < inputSelectors.length; i++) {
+              try {
+                var el = document.querySelector(inputSelectors[i]);
+                if (el && el.offsetParent !== null) {
+                  inputEl = el;
+                  break;
+                }
+              } catch(e) {}
+            }
+            
+            // 也查找上传按钮（附件/回形针按钮）
+            var uploadBtnSelectors = [
+              'button[aria-label*="附件"]', 'button[aria-label*="上传"]', 'button[aria-label*="文件"]',
+              'button[aria-label*="attach"]', 'button[aria-label*="upload"]', 'button[aria-label*="file"]',
+              'button[data-testid*="attach"]', 'button[data-testid*="upload"]', 'button[data-testid*="file"]',
+              'div[class*="attach"] button', 'div[class*="upload"] button',
+              'label[for*="file"]', 'label[for*="upload"]',
+              'input[type="file"]'
+            ];
+            
+            var targetEl = inputEl || document.body;
+            
+            // 方法1: 模拟拖放事件（最通用的方式）
+            var dt = new DataTransfer();
+            dt.items.add(file);
+            
+            // 在输入区域触发 drop 事件
+            var dropTarget = inputEl || document.querySelector('[class*="chat"]') || document.querySelector('[class*="input"]') || document.body;
+            
+            // 先触发 dragenter 和 dragover
+            var dragEnterEvent = new DragEvent('dragenter', {
+              bubbles: true, cancelable: true, dataTransfer: dt
+            });
+            dropTarget.dispatchEvent(dragEnterEvent);
+            
+            var dragOverEvent = new DragEvent('dragover', {
+              bubbles: true, cancelable: true, dataTransfer: dt
+            });
+            dropTarget.dispatchEvent(dragOverEvent);
+            
+            // 触发 drop 事件
+            var dropEvent = new DragEvent('drop', {
+              bubbles: true, cancelable: true, dataTransfer: dt
+            });
+            dropTarget.dispatchEvent(dropEvent);
+            console.log('[uploadFile] ✓ 已触发 drop 事件到:', dropTarget.tagName, dropTarget.className?.substring(0, 50));
+            
+            // 方法2: 查找隐藏的 file input 并设置文件
+            setTimeout(function() {
+              var fileInputs = document.querySelectorAll('input[type="file"]');
+              if (fileInputs.length > 0) {
+                for (var i = 0; i < fileInputs.length; i++) {
+                  try {
+                    var fi = fileInputs[i];
+                    var newDt = new DataTransfer();
+                    newDt.items.add(file);
+                    fi.files = newDt.files;
+                    fi.dispatchEvent(new Event('change', { bubbles: true }));
+                    fi.dispatchEvent(new Event('input', { bubbles: true }));
+                    console.log('[uploadFile] ✓ 已设置 file input:', i);
+                  } catch(e) {
+                    console.log('[uploadFile] file input 设置失败:', i, e.message);
+                  }
+                }
+              }
+            }, 300);
+            
+            // 方法3: 尝试点击上传按钮
+            setTimeout(function() {
+              for (var i = 0; i < uploadBtnSelectors.length; i++) {
+                try {
+                  var btn = document.querySelector(uploadBtnSelectors[i]);
+                  if (btn && btn.offsetParent !== null && btn.tagName !== 'INPUT') {
+                    console.log('[uploadFile] 找到上传按钮:', uploadBtnSelectors[i]);
+                    // 不自动点击，因为可能会打开系统文件对话框
+                    break;
+                  }
+                } catch(e) {}
+              }
+            }, 100);
+            
+            return true;
+          } catch(error) {
+            console.error('[uploadFile] 上传失败:', error);
+            return false;
+          }
+        })();
+      `;
+      
+      // @ts-ignore
+      await webview.executeJavaScript(uploadScript);
+      console.log(`[uploadFile] ✓ 文件上传脚本已执行 (${aiName})`);
+      
+      // 等待文件处理
+      await new Promise(resolve => setTimeout(resolve, 500));
+      return true;
+    } catch (error) {
+      console.error(`[uploadFile] ✗ 上传文件到 ${aiName} 失败:`, error);
+      return false;
+    }
+  }, []);
+
+  // 向所有 AI 发送非图片文件
+  const sendFilesToAllAIs = useCallback(async (files: AttachedFile[]) => {
+    const activeAIs = aiList.filter(ai => ai.active);
+    
+    for (const file of files) {
+      for (const ai of activeAIs) {
+        const webview = webviewRefsMap.current.get(ai.id);
+        if (webview && 'executeJavaScript' in webview) {
+          await uploadFileToWebview(webview, file, ai.name);
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+      }
+    }
+  }, [aiList, uploadFileToWebview]);
 
   // 向所有 AI 发送新建对话命令
   const triggerNewChatInAllAIs = useCallback(async () => {
