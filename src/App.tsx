@@ -1245,6 +1245,117 @@ function App() {
   const [inputValue, setInputValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   
+  // 粘贴的图片列表 (dataURL 格式)
+  const [pastedImages, setPastedImages] = useState<string[]>([]);
+  
+  // 处理粘贴事件 - 捕获图片
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            const dataURL = event.target?.result as string;
+            if (dataURL) {
+              setPastedImages(prev => [...prev, dataURL]);
+            }
+          };
+          reader.readAsDataURL(file);
+        }
+      }
+    }
+  }, []);
+
+  // 移除粘贴的图片
+  const handleRemoveImage = useCallback((index: number) => {
+    setPastedImages(prev => prev.filter((_, i) => i !== index));
+  }, []);
+
+  // 向单个 AI webview 粘贴图片（通过系统剪贴板 + 模拟 Ctrl+V）
+  const pasteImageToWebview = useCallback(async (webview: HTMLElement, imageDataURL: string, aiName: string) => {
+    try {
+      // 1. 将图片写入系统剪贴板
+      // @ts-ignore
+      const result = await window.electronAPI?.writeImageToClipboard(imageDataURL);
+      if (!result?.success) {
+        console.error(`[pasteImage] 写入剪贴板失败 (${aiName}):`, result?.error);
+        return false;
+      }
+      console.log(`[pasteImage] ✓ 图片已写入剪贴板 (${aiName}), 尺寸:`, result.size);
+
+      // 2. 聚焦 webview 中的输入框
+      const config = getAIInputConfig(aiName);
+      const focusScript = `
+        (function() {
+          const selectors = '${config.inputSelector}'.split(', ');
+          for (const selector of selectors) {
+            try {
+              const el = document.querySelector(selector);
+              if (el && el.offsetParent !== null) {
+                el.focus();
+                el.click();
+                console.log('[pasteImage] ✓ 已聚焦输入框:', selector);
+                return true;
+              }
+            } catch(e) {}
+          }
+          console.error('[pasteImage] ✗ 未找到输入框');
+          return false;
+        })();
+      `;
+      // @ts-ignore
+      await webview.executeJavaScript(focusScript);
+
+      // 3. 等待聚焦生效，然后模拟 Ctrl+V
+      await new Promise(resolve => setTimeout(resolve, 200));
+      
+      // 使用 webview 的 sendInputEvent 模拟按键（更底层，更可靠）
+      // @ts-ignore
+      if (typeof webview.sendInputEvent === 'function') {
+        // @ts-ignore
+        webview.sendInputEvent({ type: 'keyDown', keyCode: 'v', modifiers: ['control'] });
+        await new Promise(resolve => setTimeout(resolve, 50));
+        // @ts-ignore
+        webview.sendInputEvent({ type: 'keyUp', keyCode: 'v', modifiers: ['control'] });
+        console.log(`[pasteImage] ✓ 已通过 sendInputEvent 发送 Ctrl+V (${aiName})`);
+      } else {
+        // 备选：通过 JS 模拟粘贴事件
+        const pasteScript = `
+          (function() {
+            const selectors = '${config.inputSelector}'.split(', ');
+            for (const selector of selectors) {
+              try {
+                const el = document.querySelector(selector);
+                if (el && el.offsetParent !== null) {
+                  el.focus();
+                  document.execCommand('paste');
+                  console.log('[pasteImage] ✓ 已执行 execCommand paste');
+                  return true;
+                }
+              } catch(e) {}
+            }
+            return false;
+          })();
+        `;
+        // @ts-ignore
+        await webview.executeJavaScript(pasteScript);
+      }
+
+      // 4. 等待图片上传处理
+      await new Promise(resolve => setTimeout(resolve, 500));
+      return true;
+    } catch (error) {
+      console.error(`[pasteImage] ✗ 粘贴图片到 ${aiName} 失败:`, error);
+      return false;
+    }
+  }, []);
+
   // 发送按钮抖动和提示状态
   const [showInputHint, setShowInputHint] = useState(false);
   const [isShaking, setIsShaking] = useState(false);
@@ -1263,16 +1374,19 @@ function App() {
   }, []);
 
   const handleSendClick = async () => {
-    if (!inputValue.trim()) {
-      // 无内容时抖动并显示提示
+    const hasImages = pastedImages.length > 0;
+    if (!inputValue.trim() && !hasImages) {
+      // 无内容且无图片时抖动并显示提示
       setIsShaking(true);
       setShowInputHint(true);
       setTimeout(() => setIsShaking(false), 500);
       setTimeout(() => setShowInputHint(false), 2000);
     } else {
-      // 有内容时发送到所有 AI
+      // 有内容或图片时发送到所有 AI
       const text = inputValue.trim();
+      const images = [...pastedImages];
       setInputValue('');
+      setPastedImages([]);
       setIsSending(true);
       
       // 创建新消息
@@ -1296,7 +1410,18 @@ function App() {
       }));
       
       try {
-        await sendToAllAIs(text);
+        // 先发送图片（如果有），再发送文本
+        if (images.length > 0) {
+          console.log(`[handleSendClick] 发送 ${images.length} 张图片...`);
+          await sendImagesToAllAIs(images);
+          // 图片发送后等待一段时间让 AI 处理
+          await new Promise(resolve => setTimeout(resolve, 800));
+        }
+        
+        // 发送文本消息
+        if (text) {
+          await sendToAllAIs(text);
+        }
         
         // 延迟一段时间后捕获各 AI 的对话 URL（等待 AI 网站生成对话链接）
         const currentConvId = activeConversationId;
@@ -1533,6 +1658,22 @@ function App() {
     }
   }, [aiList]);
   
+  // 向所有 AI 发送图片（通过剪贴板粘贴方式）
+  const sendImagesToAllAIs = useCallback(async (images: string[]) => {
+    const activeAIs = aiList.filter(ai => ai.active);
+    
+    for (const imageDataURL of images) {
+      for (const ai of activeAIs) {
+        const webview = webviewRefsMap.current.get(ai.id);
+        if (webview && 'executeJavaScript' in webview) {
+          await pasteImageToWebview(webview, imageDataURL, ai.name);
+          // 每个 AI 之间稍微等待，避免剪贴板冲突
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+      }
+    }
+  }, [aiList, pasteImageToWebview]);
+
   // 向所有 AI 发送新建对话命令
   const triggerNewChatInAllAIs = useCallback(async () => {
     const activeAIs = aiList.filter(ai => ai.active);
@@ -2109,20 +2250,55 @@ function App() {
               </GlassPanel>
 
               {/* Bottom Area: Input + Action Button */}
-              <div className="h-20 shrink-0 flex gap-4">
-              {/* Input Bar - 进一步缩短宽度，让添加AI按钮左移 */}
+              <div className={cn("shrink-0 flex gap-4", pastedImages.length > 0 ? "h-28" : "h-20")} style={{ transition: 'height 0.2s ease' }}>
+              {/* Input Bar - 支持粘贴图片 */}
               <GlassPanel 
                 intensity="medium" 
                 darkMode={darkMode}
                 className={cn(
-                  "flex-[0_0_calc(100%-6rem)] flex items-center px-4 gap-3 !rounded-2xl",
+                  "flex-[0_0_calc(100%-6rem)] flex flex-col px-4 gap-1 !rounded-2xl",
                   darkMode ? "!bg-white/15" : "!bg-white/40"
                 )}
               >
+                  {/* 图片预览区域 */}
+                  {pastedImages.length > 0 && (
+                    <div className="flex items-center gap-2 pt-2 overflow-x-auto custom-scrollbar">
+                      {pastedImages.map((img, index) => (
+                        <div key={index} className="relative shrink-0 group">
+                          <img 
+                            src={img} 
+                            alt={`粘贴图片 ${index + 1}`}
+                            className={cn(
+                              "h-10 w-10 object-cover rounded-lg border",
+                              darkMode ? "border-white/20" : "border-emerald-200"
+                            )}
+                          />
+                          <button
+                            onClick={() => handleRemoveImage(index)}
+                            className={cn(
+                              "absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full flex items-center justify-center text-white opacity-0 group-hover:opacity-100 transition-opacity",
+                              "bg-red-500 hover:bg-red-600"
+                            )}
+                          >
+                            <X size={10} />
+                          </button>
+                        </div>
+                      ))}
+                      <span className={cn(
+                        "text-[10px] shrink-0",
+                        darkMode ? "text-emerald-100/30" : "text-emerald-900/30"
+                      )}>
+                        Ctrl+V 粘贴图片
+                      </span>
+                    </div>
+                  )}
+                  
+                  {/* 输入框行 */}
+                  <div className="flex items-center gap-3 flex-1">
                   <input 
                     ref={inputRef}
                     type="text" 
-                    placeholder="问点难的，一问多答"
+                    placeholder={pastedImages.length > 0 ? "添加文字说明（可选）" : "问点难的，一问多答（支持 Ctrl+V 粘贴图片）"}
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyDown={(e) => {
@@ -2131,6 +2307,7 @@ function App() {
                         handleSendClick();
                       }
                     }}
+                    onPaste={handlePaste}
                     className={cn(
                       "flex-1 bg-transparent border-none outline-none text-sm h-full transition-colors duration-500",
                       darkMode 
@@ -2170,7 +2347,7 @@ function App() {
                           "p-3 rounded-xl transition-all duration-300 cursor-pointer",
                           isSending
                             ? "text-gray-400 cursor-wait"
-                            : inputValue.trim()
+                            : (inputValue.trim() || pastedImages.length > 0)
                               ? darkMode 
                                 ? "text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/20" 
                                 : "text-emerald-600 hover:text-emerald-700 hover:bg-emerald-500/10"
@@ -2200,6 +2377,7 @@ function App() {
                         )} />
                       </motion.div>
                     </div>
+                  </div>
                   </div>
                 </GlassPanel>
 

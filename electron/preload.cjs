@@ -9,5 +9,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 窗口控制 API
   minimizeWindow: () => ipcRenderer.send('window-minimize'),
   maximizeWindow: () => ipcRenderer.send('window-maximize'),
-  closeWindow: () => ipcRenderer.send('window-close')
+  closeWindow: () => ipcRenderer.send('window-close'),
+
+  // 剪贴板 API - 用于将图片写入系统剪贴板，以便粘贴到 AI webview
+  writeImageToClipboard: (dataURL) => ipcRenderer.invoke('clipboard-write-image', dataURL),
+  clearClipboard: () => ipcRenderer.invoke('clipboard-clear')
 });

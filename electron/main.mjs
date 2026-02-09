@@ -1,5 +1,5 @@
 import electron from 'electron';
-const { app, BrowserWindow, session, shell } = electron;
+const { app, BrowserWindow, session, shell, ipcMain, clipboard, nativeImage } = electron;
 import path from 'path';
 import http from 'http';
 import { fileURLToPath } from 'url';
@@ -253,6 +253,36 @@ app.whenReady().then(() => {
       });
     }
   });
+});
+
+// --- 剪贴板 IPC 处理 ---
+// 将 dataURL 格式的图片写入系统剪贴板
+ipcMain.handle('clipboard-write-image', async (event, dataURL) => {
+  try {
+    if (!dataURL || typeof dataURL !== 'string') {
+      return { success: false, error: 'Invalid dataURL' };
+    }
+    const image = nativeImage.createFromDataURL(dataURL);
+    if (image.isEmpty()) {
+      return { success: false, error: 'Failed to create image from dataURL' };
+    }
+    clipboard.writeImage(image);
+    console.log('[Clipboard] 图片已写入剪贴板, 尺寸:', image.getSize());
+    return { success: true, size: image.getSize() };
+  } catch (error) {
+    console.error('[Clipboard] 写入图片失败:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 清空剪贴板
+ipcMain.handle('clipboard-clear', async () => {
+  try {
+    clipboard.clear();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 });
 
 app.on('window-all-closed', () => {
