@@ -1243,6 +1243,7 @@ function App() {
 
   // 输入框内容
   const [inputValue, setInputValue] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
   
   // 发送按钮抖动和提示状态
   const [showInputHint, setShowInputHint] = useState(false);
@@ -1327,6 +1328,8 @@ function App() {
         
       } finally {
         setIsSending(false);
+        // 发送完成后自动聚焦输入框，方便用户继续输入
+        setTimeout(() => inputRef.current?.focus(), 100);
       }
     }
   };
@@ -2117,8 +2120,9 @@ function App() {
                 )}
               >
                   <input 
+                    ref={inputRef}
                     type="text" 
-                    placeholder="问点难的，让他们多想想"
+                    placeholder="问点难的，一问多答"
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyDown={(e) => {
